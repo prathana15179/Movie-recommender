@@ -18,17 +18,68 @@ movie_stats = ratings.groupby('movieId')['rating'].agg(['mean','count']).reset_i
 movie_stats.rename(columns={'mean':'avg_rating','count':'num_ratings'}, inplace=True)
 movies_full = movies.merge(movie_stats, on='movieId', how='left')
 
+# ensure numeric stats exist even if NaN
+movies_full['num_ratings'] = movies_full['num_ratings'].fillna(0)
+movies_full['avg_rating']  = movies_full['avg_rating'].fillna(0)
+
+# split genres into sets for overlap scoring
+movies_full['genres_set'] = movies_full['genres'].fillna('').str.split('|').apply(set)
+
 # Recommendation function
-def recommend_popular_similar(movie_name, n=10, min_ratings=20):
-    try:
-        genre = movies_full.loc[movies_full['title'] == movie_name, 'genres'].values[0]
-    except IndexError:
+def recommend_popular_similar(movie_name, n=10, min_ratings=10, loose=True):
+    # find target movie row
+    row = movies_full.loc[movies_full['title'] == movie_name]
+    if row.empty:
         return None
-    similar = movies_full[movies_full['genres'] == genre]
-    popular = similar[similar['num_ratings'] >= min_ratings]
-    result = popular.sort_values(['avg_rating','num_ratings'], ascending=False)
-    result = result[result['title'] != movie_name]
-    return result[['title','genres','avg_rating','num_ratings']].head(n)
+
+    # turn genre string into a set of words
+    target_set = set(str(row['genres'].values[0]).split('|'))
+
+    # compute simple overlap between sets
+    def jaccard(a, b):
+        if not a or not b:
+            return 0.0
+        inter = len(a & b)
+        union = len(a | b)
+        return inter / union if union else 0.0
+
+    df = movies_full.copy()
+    df = df[df['title'] != movie_name]  # skip same movie
+
+    # strict: exact match
+    strict = df[df['genres'] == row['genres'].values[0]]
+
+    # loose: overlap > 0
+    if loose:
+        df['overlap'] = df['genres'].apply(lambda g: jaccard(set(str(g).split('|')), target_set))
+        loose_matches = df[df['overlap'] > 0]
+    else:
+        loose_matches = pd.DataFrame(columns=df.columns.tolist() + ['overlap'])
+
+    # prefer strict if found; else loose
+    cand = strict if not strict.empty else loose_matches
+
+    # relax popularity threshold if nothing passes
+    if cand.empty:
+        cand = df
+
+    # apply min_ratings filter
+    filtered = cand[cand['num_ratings'] >= min_ratings]
+    if filtered.empty:
+        filtered = cand
+
+    # assign a simple score
+    if 'overlap' not in filtered.columns:
+        filtered['overlap'] = 0
+    filtered['score'] = (
+        0.6 * filtered['overlap'] +
+        0.3 * (filtered['avg_rating'] / 5.0) +
+        0.1 * (filtered['num_ratings'] / (filtered['num_ratings'].max() or 1))
+    )
+
+    out = filtered.sort_values(['score','avg_rating','num_ratings'], ascending=False)
+    return out[['title','genres','avg_rating','num_ratings']].head(n)
+
 
 # Streamlit interface
 st.title("🍿 Simple Movie Recommender")
