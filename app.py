@@ -83,38 +83,82 @@ def _is_valid_url(u):
     return p.scheme in ("http", "https") and bool(p.netloc)
 
 @st.cache_data(ttl=60 * 60 * 24)
-def fetch_poster_url_omdb(title):
-    """Return a poster URL for a movie title using OMDb; None if not found."""
+# -------------------------------
+# Poster helpers (OMDb ➜ TMDB fallback)
+# -------------------------------
+import re, requests
+from urllib.parse import urlparse, quote
+
+def _clean_title_for_search(title: str) -> str:
+    t = re.sub(r"\(\d{4}\)$", "", str(title)).strip()
+    return t.strip(" '\"")
+
+def _year_from_title(title: str):
+    m = re.search(r"\((\d{4})\)$", str(title))
+    return int(m.group(1)) if m else None
+
+def _is_valid_url(u) -> bool:
+    if not isinstance(u, str):
+        return False
+    p = urlparse(u)
+    return p.scheme in ("http", "https") and bool(p.netloc)
+
+@st.cache_data(ttl=60*60*24)
+def _fetch_omdb(title: str) -> str | None:
     api_key = st.secrets.get("OMDB_API_KEY")
     if not api_key:
         return None
-
     cleaned = _clean_title_for_search(title)
     year = _year_from_title(title)
-
     try:
-        # 1) exact lookup
+        # exact
         params = {"t": cleaned, "apikey": api_key}
-        if year:
-            params["y"] = year
+        if year: params["y"] = year
         r = requests.get("https://www.omdbapi.com/", params=params, timeout=10)
-        data = r.json() if r.ok else {}
-        poster = data.get("Poster")
-        if _is_valid_url(poster):
-            return poster
-
-        # 2) search fallback (prefer type=movie; first valid poster)
+        if r.ok:
+            poster = r.json().get("Poster")
+            if _is_valid_url(poster):
+                return poster
+        # search fallback
         sr = requests.get("https://www.omdbapi.com/", params={"s": cleaned, "apikey": api_key}, timeout=10)
-        sdata = sr.json() if sr.ok else {}
-        items = sdata.get("Search") or []
-        items.sort(key=lambda it: 0 if it.get("Type") == "movie" else 1)
-        for it in items:
-            p = it.get("Poster")
-            if _is_valid_url(p):
-                return p
+        if sr.ok:
+            items = (sr.json().get("Search") or [])
+            items.sort(key=lambda it: 0 if it.get("Type") == "movie" else 1)
+            for it in items:
+                p = it.get("Poster")
+                if _is_valid_url(p):
+                    return p
     except Exception:
         return None
     return None
+
+@st.cache_data(ttl=60*60*24)
+def _fetch_tmdb(title: str) -> str | None:
+    api_key = st.secrets.get("TMDB_API_KEY")
+    if not api_key:
+        return None
+    cleaned = _clean_title_for_search(title)
+    year = _year_from_title(title)
+    try:
+        q = quote(cleaned)
+        url = f"https://api.themoviedb.org/3/search/movie?api_key={api_key}&query={q}"
+        if year: url += f"&year={year}"
+        r = requests.get(url, timeout=10)
+        if not r.ok:
+            return None
+        results = r.json().get("results") or []
+        results.sort(key=lambda x: 0 if (year and x.get("release_date","")[:4]==str(year)) else 1)
+        for it in results:
+            path = it.get("poster_path")
+            if path:
+                return f"https://image.tmdb.org/t/p/w342{path}"
+    except Exception:
+        return None
+    return None
+
+def fetch_poster_url(title: str) -> str | None:
+    # Try OMDb first, then TMDB
+    return _fetch_omdb(title) or _fetch_tmdb(title)
 
 def _placeholder_box():
     st.markdown(
@@ -127,16 +171,14 @@ def _placeholder_box():
         unsafe_allow_html=True,
     )
 
-def render_cards(df):
-    """Render a grid of posters with titles; safe even if poster URL is bad."""
+def render_cards(df: pd.DataFrame):
     if df is None or df.empty:
         st.warning("No recommendations found. Try lowering the minimum ratings.")
         return
-
-    cols = st.columns(5)  # 5 cards per row
+    cols = st.columns(5)
     for i, (_, row) in enumerate(df.iterrows()):
         title = str(row["title"])
-        poster = fetch_poster_url_omdb(title)
+        poster = fetch_poster_url(title)
         with cols[i % 5]:
             try:
                 if _is_valid_url(poster):
@@ -146,22 +188,3 @@ def render_cards(df):
             except Exception:
                 _placeholder_box()
             st.caption(f"**{title}**  \n{row['genres']}")
-
-# ===============================
-# UI
-# ===============================
-st.title("🍿 Simple Movie Recommender")
-st.write("Find **popular movies** that are similar to the one you like!")
-
-movie_name = st.selectbox("🎥 Choose a movie:", sorted(movies_full["title"].dropna().unique()))
-num = st.slider("How many recommendations?", 5, 20, 10)
-min_r = st.slider("Minimum number of ratings", 0, 100, 10)
-
-if st.button("Show Recommendations"):
-    recs = recommend_popular_similar(movie_name, n=num, min_ratings=min_r)
-    if recs is not None and not recs.empty:
-        st.subheader(f"Because you liked **{movie_name}**, you might also enjoy:")
-        render_cards(recs)     # poster grid
-        st.dataframe(recs)     # optional table
-    else:
-        st.warning("Sorry, no similar movies found. Try different settings.")
