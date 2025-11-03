@@ -1,11 +1,11 @@
-# app.py — Simple Movie Recommender with Posters (OMDb)
+# app.py — Simple Movie Recommender with Posters (OMDb + TMDB)
 
 import streamlit as st
 import pandas as pd
 from pathlib import Path
 import requests
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
 # ===============================
 # Data loading (path-safe)
@@ -65,30 +65,8 @@ def recommend_popular_similar(movie_name, n=10, min_ratings=10):
     return out[["title", "genres", "avg_rating", "num_ratings"]].head(n)
 
 # ===============================
-# Poster helpers (OMDb)
-# ===============================
-def _clean_title_for_search(title):
-    # remove trailing year in parentheses & surrounding quotes
-    t = re.sub(r"\(\d{4}\)$", "", str(title)).strip()
-    return t.strip(" '\"")
-
-def _year_from_title(title):
-    m = re.search(r"\((\d{4})\)$", str(title))
-    return int(m.group(1)) if m else None
-
-def _is_valid_url(u):
-    if not isinstance(u, str):
-        return False
-    p = urlparse(u)
-    return p.scheme in ("http", "https") and bool(p.netloc)
-
-@st.cache_data(ttl=60 * 60 * 24)
-# -------------------------------
 # Poster helpers (OMDb ➜ TMDB fallback)
-# -------------------------------
-import re, requests
-from urllib.parse import urlparse, quote
-
+# ===============================
 def _clean_title_for_search(title: str) -> str:
     t = re.sub(r"\(\d{4}\)$", "", str(title)).strip()
     return t.strip(" '\"")
@@ -97,7 +75,7 @@ def _year_from_title(title: str):
     m = re.search(r"\((\d{4})\)$", str(title))
     return int(m.group(1)) if m else None
 
-def _is_valid_url(u) -> bool:
+def _is_valid_url(u):
     if not isinstance(u, str):
         return False
     p = urlparse(u)
@@ -113,7 +91,8 @@ def _fetch_omdb(title: str) -> str | None:
     try:
         # exact
         params = {"t": cleaned, "apikey": api_key}
-        if year: params["y"] = year
+        if year:
+            params["y"] = year
         r = requests.get("https://www.omdbapi.com/", params=params, timeout=10)
         if r.ok:
             poster = r.json().get("Poster")
@@ -142,12 +121,13 @@ def _fetch_tmdb(title: str) -> str | None:
     try:
         q = quote(cleaned)
         url = f"https://api.themoviedb.org/3/search/movie?api_key={api_key}&query={q}"
-        if year: url += f"&year={year}"
+        if year:
+            url += f"&year={year}"
         r = requests.get(url, timeout=10)
         if not r.ok:
             return None
         results = r.json().get("results") or []
-        results.sort(key=lambda x: 0 if (year and x.get("release_date","")[:4]==str(year)) else 1)
+        results.sort(key=lambda x: 0 if (year and x.get("release_date", "")[:4] == str(year)) else 1)
         for it in results:
             path = it.get("poster_path")
             if path:
@@ -171,7 +151,7 @@ def _placeholder_box():
         unsafe_allow_html=True,
     )
 
-def render_cards(df: pd.DataFrame):
+def render_cards(df):
     if df is None or df.empty:
         st.warning("No recommendations found. Try lowering the minimum ratings.")
         return
@@ -188,3 +168,22 @@ def render_cards(df: pd.DataFrame):
             except Exception:
                 _placeholder_box()
             st.caption(f"**{title}**  \n{row['genres']}")
+
+# ===============================
+# UI
+# ===============================
+st.title("🍿 Simple Movie Recommender")
+st.write("Find **popular movies** that are similar to the one you like!")
+
+movie_name = st.selectbox("🎥 Choose a movie:", sorted(movies_full["title"].dropna().unique()))
+num = st.slider("How many recommendations?", 5, 20, 10)
+min_r = st.slider("Minimum number of ratings", 0, 100, 10)
+
+if st.button("Show Recommendations"):
+    recs = recommend_popular_similar(movie_name, n=num, min_ratings=min_r)
+    if recs is not None and not recs.empty:
+        st.subheader(f"Because you liked **{movie_name}**, you might also enjoy:")
+        render_cards(recs)     # poster grid
+        st.dataframe(recs)     # optional table
+    else:
+        st.warning("Sorry, no similar movies found. Try different settings.")
