@@ -6,8 +6,12 @@ import pandas as pd
 # ==========================
 
 # Load the data
-movies = pd.read_csv("/content/sample_data/movies.csv")
-ratings = pd.read_csv("/content/sample_data/ratings.csv")
+from pathlib import Path
+
+BASE_DIR = Path(__file__).parent  # the folder where app.py lives
+movies = pd.read_csv(BASE_DIR / "movies.csv")
+ratings = pd.read_csv(BASE_DIR / "ratings.csv")
+
 
 # Combine movie info and average rating
 movie_stats = ratings.groupby('movieId')['rating'].agg(['mean','count']).reset_index()
