@@ -9,7 +9,78 @@ from pathlib import Path
 # -------------------------------
 BASE_DIR = Path(__file__).parent
 movies  = pd.read_csv(BASE_DIR / "movies.csv")
-ratings = pd.read_csv(BASE_DIR / "ratings.csv")
+ratings = pd.read_csv(BASE_DIR / "ratings.csv")import re, requests
+from urllib.parse import urlparse
+
+def _clean_title_for_search(title: str) -> str:
+    t = re.sub(r"\(\d{4}\)$", "", str(title)).strip()
+    return t.strip(" '\"")
+
+def _year_from_title(title: str):
+    m = re.search(r"\((\d{4})\)$", str(title))
+    return int(m.group(1)) if m else None
+
+def _is_valid_url(u: str | None) -> bool:
+    if not isinstance(u, str): 
+        return False
+    p = urlparse(u)
+    return p.scheme in ("http", "https") and bool(p.netloc)
+
+@st.cache_data(ttl=60*60*24)
+def fetch_poster_url_omdb(title: str) -> str | None:
+    api_key = st.secrets.get("OMDB_API_KEY")
+    if not api_key:
+        return None
+
+    cleaned = _clean_title_for_search(title)
+    year = _year_from_title(title)
+
+    try:
+        # 1) exact lookup
+        params = {"t": cleaned, "apikey": api_key}
+        if year: params["y"] = year
+        r = requests.get("https://www.omdbapi.com/", params=params, timeout=10).json()
+        poster = r.get("Poster")
+        if _is_valid_url(poster):
+            return poster
+
+        # 2) search fallback
+        sr = requests.get("https://www.omdbapi.com/", params={"s": cleaned, "apikey": api_key}, timeout=10).json()
+        items = sr.get("Search") or []
+        # pick first with a valid poster (prefer type=movie)
+        items.sort(key=lambda it: 0 if it.get("Type") == "movie" else 1)
+        for it in items:
+            p = it.get("Poster")
+            if _is_valid_url(p):
+                return p
+    except Exception:
+        return None
+    return None
+
+def render_cards(df):
+    if df is None or df.empty:
+        st.warning("No recommendations found.")
+        return
+    cols = st.columns(5)
+    for i, (_, row) in enumerate(df.iterrows()):
+        title = str(row["title"])
+        poster = fetch_poster_url_omdb(title)
+        with cols[i % 5]:
+            if _is_valid_url(poster):
+                st.image(poster, use_container_width=True)
+            else:
+                # pretty placeholder box
+                st.markdown(
+                    """
+                    <div style="width:100%;aspect-ratio:2/3;border-radius:12px;border:1px solid #444;
+                                display:flex;align-items:center;justify-content:center;background:#222;">
+                        <span style="opacity:.7">No poster</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+            st.caption(f"**{title}**  \n{row['genres']}")
+
 
 movie_stats = ratings.groupby('movieId')['rating'].agg(['mean','count']).reset_index()
 movie_stats.rename(columns={'mean':'avg_rating','count':'num_ratings'}, inplace=True)
